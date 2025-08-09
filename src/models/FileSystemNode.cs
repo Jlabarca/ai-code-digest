@@ -1,7 +1,6 @@
-// src/models/FileSystemNode.cs
-namespace CodeConsolidator.Models;
+namespace CodeDigest.Models;
 
-public abstract record FileSystemNode(string Name, string Path, long Size);
+public abstract record FileSystemNode(string Name, string Path, long Size, bool IsIgnored);
 
 public record FileNode(
     string Name,
@@ -9,8 +8,9 @@ public record FileNode(
     long Size,
     int TokenCount,
     string Content,
-    bool IsTextFile
-) : FileSystemNode(Name, Path, Size);
+    bool IsTextFile,
+    bool IsIgnored
+) : FileSystemNode(Name, Path, Size, IsIgnored);
 
 public record DirectoryNode(
     string Name,
@@ -19,5 +19,6 @@ public record DirectoryNode(
     int TotalTokenCount,
     int FileCount,
     int DirCount,
-    List<FileSystemNode> Children
-) : FileSystemNode(Name, Path, 0);
+    List<FileSystemNode> Children,
+    bool IsIgnored
+) : FileSystemNode(Name, Path, Size, IsIgnored);

@@ -1,6 +1,5 @@
-
-using CodeConsolidator.Models;
-using CodeConsolidator.Services;
+using CodeDigest.Models;
+using CodeDigest.Services;
 using DotNet.Globbing;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -20,21 +19,21 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 
   public override async Task<int> ExecuteAsync(CommandContext context, AnalyzeSettings settings)
   {
-    AnsiConsole.Write(new FigletText("CodeConsolidator").Centered().Color(Color.Aqua));
+    AnsiConsole.Write(new FigletText("CodeDigest").Centered().Color(Color.Aqua));
 
     // 1. Load prompt library content
     var promptLibraryContent = await LoadPromptLibraryAsync(settings.PromptLibraryPath);
 
-    // 2. Combine all ignore patterns
-    var allIgnores = await LoadIgnorePatternsAsync(settings);
-    var ignoreGlob = Glob.Parse(string.Join(",", allIgnores), new GlobOptions { Evaluation = { CaseInsensitive = true } });
+    // 2. Load patterns and create the gitignore-style matcher
+    var rawPatterns = await LoadIgnorePatternsAsync(settings);
+    var ignoreMatcher = new GitIgnoreMatcher(rawPatterns, settings.Path);
 
     // 3. Analyze the directory
     var analyzer = new AnalyzerService();
     DirectoryNode? analysisResult = null;
     await AnsiConsole.Status().StartAsync("Analyzing codebase...", async _ =>
     {
-      analysisResult = await analyzer.AnalyzeAsync(settings.Path, ignoreGlob);
+      analysisResult = await analyzer.AnalyzeAsync(settings.Path, ignoreMatcher, settings);
     });
 
     if (analysisResult is null)
@@ -47,14 +46,14 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
     var report = GenerateTextReport(analysisResult, promptLibraryContent.ToString());
     var outputFileName = settings.OutputFile ?? $"{new DirectoryInfo(settings.Path).Name}_digest.txt";
     await File.WriteAllTextAsync(outputFileName, report);
-    AnsiConsole.MarkupLine($"[green]✔ Analysis complete. Report saved to:[/] [blue]{Path.GetFullPath(outputFileName)}[/]");
+        AnsiConsole.MarkupLine($"[green](Success) Analysis complete. Report saved to:[/] [blue]{Path.GetFullPath(outputFileName)}[/]");
 
     // 5. Display summary and handle clipboard
     DisplaySummary(analysisResult);
     if (AnsiConsole.Confirm("Copy full report to clipboard?"))
     {
       await ClipboardService.SetTextAsync(report);
-      AnsiConsole.MarkupLine("[green]✔ Report copied to clipboard.[/]");
+      AnsiConsole.MarkupLine("[green](Success) Report copied to clipboard.[/]");
     }
     return 0;
   }
@@ -82,11 +81,28 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
     {
       fileIgnores.AddRange(await File.ReadAllLinesAsync(ignoreFilePath));
     }
-    return DefaultIgnorePatterns
+
+    var allPatterns = DefaultIgnorePatterns
         .Concat(settings.IgnorePatterns)
         .Concat(fileIgnores)
         .Where(p => !string.IsNullOrWhiteSpace(p) && !p.Trim().StartsWith("#"))
-        .ToArray();
+        .ToList();
+
+    var processedPatterns = new List<string>();
+    foreach (var pattern in allPatterns)
+    {
+      if (!pattern.Contains('*') && !pattern.Contains('/') && !pattern.Contains('\\'))
+      {
+        processedPatterns.Add($"**/{pattern}/**");
+        processedPatterns.Add($"**/{pattern}");
+      }
+      else
+      {
+        processedPatterns.Add(pattern);
+      }
+    }
+
+    return processedPatterns.ToArray();
   }
 
   private void DisplaySummary(DirectoryNode root)
@@ -110,18 +126,53 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
   {
     foreach (var child in dirNode.Children.OrderBy(c => c is DirectoryNode ? 0 : 1).ThenBy(c => c.Name))
     {
-      var node = parentNode.AddNode(child is DirectoryNode
-          ? $"[blue]:file_folder: {child.Name}[/]"
-          : $"[grey]:page_facing_up: {child.Name}[/]");
-
+        var color = child.IsIgnored ? "grey" : "white";
+        var node = parentNode.AddNode(child is DirectoryNode
+          ? $"[blue bold]{child.Name}[/]"
+          : $"[{color}]{child.Name}[/]");
       if (child is DirectoryNode subDir) AddNodesToTree(node, subDir);
     }
+  }
+
+  private string GenerateProjectStructure(DirectoryNode root)
+  {
+    var sb = new StringBuilder();
+    sb.AppendLine("# Project Structure");
+    sb.AppendLine("```");
+    sb.AppendLine(root.Name);
+
+    void AppendNodes(IReadOnlyList<FileSystemNode> nodes, string prefix)
+    {
+        for (var i = 0; i < nodes.Count; i++)
+        {
+            var node = nodes[i];
+            var isLast = i == nodes.Count - 1;
+            var connector = isLast ? "└── " : "├── ";
+            sb.AppendLine($"{prefix}{connector}{node.Name}");
+
+            if (node is DirectoryNode dir)
+            {
+                var newPrefix = prefix + (isLast ? "    " : "│   ");
+                var children = dir.Children.OrderBy(c => c is DirectoryNode ? 0 : 1).ThenBy(c => c.Name).ToList();
+                AppendNodes(children, newPrefix);
+            }
+        }
+    }
+
+    var children = root.Children.OrderBy(c => c is DirectoryNode ? 0 : 1).ThenBy(c => c.Name).ToList();
+    AppendNodes(children, "");
+
+    sb.AppendLine("```");
+    sb.AppendLine();
+    return sb.ToString();
   }
 
   private string GenerateTextReport(DirectoryNode root, string promptLibraryContent)
   {
     var sb = new StringBuilder();
     if (!string.IsNullOrEmpty(promptLibraryContent)) sb.Append(promptLibraryContent);
+    
+    sb.Append(GenerateProjectStructure(root));
 
     sb.AppendLine($"# Codebase Analysis for: {root.Name}");
     sb.AppendLine($"## Total Tokens: {root.TotalTokenCount:N0}");
@@ -151,7 +202,7 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
 
 
 // ReSharper disable once ClassNeverInstantiated.Global
-internal class AnalyzeSettings : CommandSettings
+public class AnalyzeSettings : CommandSettings
 {
   [CommandArgument(0, "<PATH>")]
   [Description("Path to the directory to analyze.")]
@@ -168,4 +219,9 @@ internal class AnalyzeSettings : CommandSettings
   [CommandOption("--prompt-library")]
   [Description("Path to a directory of prompt files to prepend to the report.")]
   public string? PromptLibraryPath { get; set; }
+
+  [CommandOption("--no-minify")]
+  [Description("Disable source code minification (whitespace removal).")]
+  [DefaultValue(false)]
+  public bool NoMinify { get; set; }
 }
