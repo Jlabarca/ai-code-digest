@@ -58,18 +58,15 @@ public class GitIgnoreMatcher
     /// <returns>True if the path should be ignored, false otherwise.</returns>
     public bool IsMatch(string absolutePath)
     {
-        // Normalize path separators for matching
         var normalizedPath = absolutePath.Replace('\\', '/');
+        Console.WriteLine($"Checking path: {normalizedPath}");
 
-        bool isIgnored = _ignoreGlobs.Any(g => g.IsMatch(normalizedPath));
-        if (!isIgnored)
-        {
-            return false; // Not matched by any ignore rule, so it's not ignored.
-        }
+        bool isIgnored = _ignoreGlobs.Any(g => {
+            var matches = g.IsMatch(normalizedPath);
+            if (matches) Console.WriteLine($"  Matched by pattern: {g}");
+            return matches;
+        });
 
-        // It was matched by an ignore rule, now check if it's un-ignored by a negation rule.
-        bool isUnignored = _unignoreGlobs.Any(g => g.IsMatch(normalizedPath));
-        
-        return !isUnignored; // The path is ignored if it's not un-ignored.
+        return isIgnored && !_unignoreGlobs.Any(g => g.IsMatch(normalizedPath));
     }
 }

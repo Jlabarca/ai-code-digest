@@ -21,14 +21,10 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
   {
     AnsiConsole.Write(new FigletText("CodeDigest").Centered().Color(Color.Aqua));
 
-    // 1. Load prompt library content
     var promptLibraryContent = await LoadPromptLibraryAsync(settings.PromptLibraryPath);
-
-    // 2. Load patterns and create the gitignore-style matcher
     var rawPatterns = await LoadIgnorePatternsAsync(settings);
     var ignoreMatcher = new GitIgnoreMatcher(rawPatterns, settings.Path);
 
-    // 3. Analyze the directory
     var analyzer = new AnalyzerService();
     DirectoryNode? analysisResult = null;
     await AnsiConsole.Status().StartAsync("Analyzing codebase...", async _ =>
@@ -42,19 +38,15 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
       return -1;
     }
 
-    // 4. Generate and save the report
     var report = GenerateTextReport(analysisResult, promptLibraryContent.ToString());
     var outputFileName = settings.OutputFile ?? $"{new DirectoryInfo(settings.Path).Name}_digest.txt";
     await File.WriteAllTextAsync(outputFileName, report);
-        AnsiConsole.MarkupLine($"[green](Success) Analysis complete. Report saved to:[/] [blue]{Path.GetFullPath(outputFileName)}[/]");
+    AnsiConsole.MarkupLine($"[green](Success) Analysis complete. Report saved to:[/] [blue]{Path.GetFullPath(outputFileName)}[/]");
 
-    // 5. Display summary and handle clipboard
     DisplaySummary(analysisResult);
-    if (AnsiConsole.Confirm("Copy full report to clipboard?"))
-    {
-      await ClipboardService.SetTextAsync(report);
-      AnsiConsole.MarkupLine("[green](Success) Report copied to clipboard.[/]");
-    }
+    await ClipboardService.SetTextAsync(report);
+    AnsiConsole.MarkupLine("[green](Success) Report copied to clipboard.[/]");
+
     return 0;
   }
 
@@ -69,17 +61,23 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
       content.AppendLine($"\n# --- From: {Path.GetFileName(file)} ---\n");
       content.AppendLine(await File.ReadAllTextAsync(file));
     }
-    content.AppendLine("--- PROMPT LIBRARY END ---\n");
+    content.AppendLine("--- PROMPT LIBRARY END ---");
     return content;
   }
 
   private async Task<string[]> LoadIgnorePatternsAsync(AnalyzeSettings settings)
   {
     var ignoreFilePath = Path.Combine(settings.Path, ".aidigestignore");
+    AnsiConsole.MarkupLine($"[dim]Attempting to load ignore file from: {ignoreFilePath}[/]");
     var fileIgnores = new List<string>();
     if (File.Exists(ignoreFilePath))
     {
       fileIgnores.AddRange(await File.ReadAllLinesAsync(ignoreFilePath));
+      AnsiConsole.MarkupLine($"[dim]Loaded {fileIgnores.Count} patterns from .aidigestignore[/]");
+    }
+    else
+    {
+      AnsiConsole.MarkupLine("[dim].aidigestignore not found.[/]");
     }
 
     var allPatterns = DefaultIgnorePatterns
@@ -87,19 +85,36 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
         .Concat(fileIgnores)
         .Where(p => !string.IsNullOrWhiteSpace(p) && !p.Trim().StartsWith("#"))
         .ToList();
+    
+    AnsiConsole.MarkupLine($"[dim]Processing {allPatterns.Count} total patterns...[/]");
 
     var processedPatterns = new List<string>();
     foreach (var pattern in allPatterns)
     {
-      if (!pattern.Contains('*') && !pattern.Contains('/') && !pattern.Contains('\\'))
-      {
-        processedPatterns.Add($"**/{pattern}/**");
-        processedPatterns.Add($"**/{pattern}");
-      }
-      else
-      {
-        processedPatterns.Add(pattern);
-      }
+        var trimmedPattern = pattern.Trim();
+        var addedPatterns = new List<string>();
+
+        if (trimmedPattern.EndsWith('/') || trimmedPattern.EndsWith('\\'))
+        {
+            var newPattern = trimmedPattern + "**";
+            processedPatterns.Add(newPattern);
+            addedPatterns.Add(newPattern);
+        }
+        else if (!trimmedPattern.Contains('*') && !trimmedPattern.Contains('/') && !trimmedPattern.Contains('\\'))
+        {
+            var dirPattern = $"**/{trimmedPattern}/**";
+            var filePattern = $"**/{trimmedPattern}";
+            processedPatterns.Add(dirPattern);
+            processedPatterns.Add(filePattern);
+            addedPatterns.Add(dirPattern);
+            addedPatterns.Add(filePattern);
+        }
+        else
+        {
+            processedPatterns.Add(trimmedPattern);
+            addedPatterns.Add(trimmedPattern);
+        }
+        AnsiConsole.MarkupLine($"[dim]  - Raw: '{trimmedPattern}' -> Processed: '{string.Join("\', \'", addedPatterns)}'[/]");
     }
 
     return processedPatterns.ToArray();
@@ -110,58 +125,75 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
     AnsiConsole.WriteLine();
     var table = new Table().Title("Analysis Summary").Border(TableBorder.Rounded);
     table.AddColumn("Metric").AddColumn("Value");
-    table.AddRow("Total Files", $"[yellow]{root.FileCount}[/]");
-    table.AddRow("Total Directories", $"[yellow]{root.DirCount}[/]");
-    table.AddRow("Total Size", $"[yellow]{root.Size / 1024.0:F2} KB[/]");
-    table.AddRow("Total Tokens", $"[yellow]{root.TotalTokenCount:N0}[/]");
+
+    table.AddRow("Included Files", $"[yellow]{root.IncludedFileCount}[/]");
+    table.AddRow("Included Dirs", $"[yellow]{root.IncludedDirCount}[/]");
+    table.AddRow("Ignored Files", $"[yellow]{root.IgnoredFileCount}[/]");
+    table.AddRow("Ignored Dirs", $"[yellow]{root.IgnoredDirCount}[/]");
+    table.AddRow("Total Size (Included)", $"[yellow]{root.Size / 1024.0:F2} KB[/]");
+    table.AddRow("Total Tokens (Included)", $"[yellow]{root.TotalTokenCount:N0}[/]");
     AnsiConsole.Write(table);
 
     AnsiConsole.WriteLine();
-    var tree = new Tree("[aqua]Project Structure[/]");
+    var tree = new Tree("[aqua]Project Structure (included files)[/]");
     AddNodesToTree(tree, root);
     AnsiConsole.Write(tree);
   }
 
   private void AddNodesToTree(IHasTreeNodes parentNode, DirectoryNode dirNode)
   {
+    // If a directory is marked as ignored, do not display it or any of its children.
+    if (dirNode.IsIgnored) return;
+
     foreach (var child in dirNode.Children.OrderBy(c => c is DirectoryNode ? 0 : 1).ThenBy(c => c.Name))
     {
-        var color = child.IsIgnored ? "grey" : "white";
+        // This check correctly skips ignored files and subdirectories within an included directory.
+        if (child.IsIgnored) continue;
+
         var node = parentNode.AddNode(child is DirectoryNode
           ? $"[blue bold]{child.Name}[/]"
-          : $"[{color}]{child.Name}[/]");
+          : child.Name);
+
       if (child is DirectoryNode subDir) AddNodesToTree(node, subDir);
     }
   }
 
+
   private string GenerateProjectStructure(DirectoryNode root)
   {
     var sb = new StringBuilder();
-    sb.AppendLine("# Project Structure");
+    sb.AppendLine("# Project Structure (all files)");
     sb.AppendLine("```");
-    sb.AppendLine(root.Name);
 
-    void AppendNodes(IReadOnlyList<FileSystemNode> nodes, string prefix)
+    void AppendNode(FileSystemNode node)
     {
-        for (var i = 0; i < nodes.Count; i++)
+        sb.Append(node.Name);
+        if (node is DirectoryNode dir)
         {
-            var node = nodes[i];
-            var isLast = i == nodes.Count - 1;
-            var connector = isLast ? "└── " : "├── ";
-            sb.AppendLine($"{prefix}{connector}{node.Name}");
+            var children = dir.Children
+                .OrderBy(c => c is DirectoryNode ? 0 : 1)
+                .ThenBy(c => c.Name)
+                .ToList();
 
-            if (node is DirectoryNode dir)
+            if (children.Count > 0)
             {
-                var newPrefix = prefix + (isLast ? "    " : "│   ");
-                var children = dir.Children.OrderBy(c => c is DirectoryNode ? 0 : 1).ThenBy(c => c.Name).ToList();
-                AppendNodes(children, newPrefix);
+                sb.Append('(');
+                for (var i = 0; i < children.Count; i++)
+                {
+                    AppendNode(children[i]);
+                    if (i < children.Count - 1)
+                    {
+                        sb.Append(' ');
+                    }
+                }
+                sb.Append(')');
             }
         }
     }
 
-    var children = root.Children.OrderBy(c => c is DirectoryNode ? 0 : 1).ThenBy(c => c.Name).ToList();
-    AppendNodes(children, "");
+    AppendNode(root);
 
+    sb.AppendLine();
     sb.AppendLine("```");
     sb.AppendLine();
     return sb.ToString();
@@ -175,27 +207,30 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
     sb.Append(GenerateProjectStructure(root));
 
     sb.AppendLine($"# Codebase Analysis for: {root.Name}");
-    sb.AppendLine($"## Total Tokens: {root.TotalTokenCount:N0}");
+    sb.AppendLine($"## Total Tokens (included files): {root.TotalTokenCount:N0}");
     sb.AppendLine("---");
 
-    void AppendContent(DirectoryNode dir, string indent)
+    void AppendContent(DirectoryNode dir)
     {
       foreach (var child in dir.Children.OrderBy(c => c is DirectoryNode ? 0 : 1).ThenBy(c => c.Name))
       {
+        if (child.IsIgnored) continue;
+
         if (child is FileNode file && file.IsTextFile)
         {
+          var fileExtension = Path.GetExtension(file.Name).TrimStart('.');
           sb.AppendLine($"\n### File: {file.Path.Replace(root.Path, "").TrimStart(Path.DirectorySeparatorChar)}");
-          sb.AppendLine("`");
+          sb.AppendLine($"```{fileExtension}");
           sb.AppendLine(file.Content);
-          sb.AppendLine("`");
+          sb.AppendLine("```");
         }
         else if (child is DirectoryNode subDir)
         {
-          AppendContent(subDir, indent + "  ");
+          AppendContent(subDir);
         }
       }
     }
-    AppendContent(root, "");
+    AppendContent(root);
     return sb.ToString();
   }
 }

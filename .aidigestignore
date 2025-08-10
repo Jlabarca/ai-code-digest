@@ -1,0 +1,46 @@
+# Build and output directories
+bin
+obj
+**/bin
+**/obj
+
+# IDE and editor files
+.git
+.idea
+.vscode
+.vs
+
+# Log files
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Package manager directories
+node_modules
+packages
+
+# Temporary and cache files
+*.tmp
+*.temp
+*.cache
+
+# Compiled files
+*.dll
+*.exe
+*.pdb
+
+# Test results
+TestResults
+
+# User-specific files
+*.user
+*.suo
+
+# NuGet packages
+*.nupkg
+
+# Documentation and prompt libraries (uncomment if you want to exclude)
+prompt_library
+docs

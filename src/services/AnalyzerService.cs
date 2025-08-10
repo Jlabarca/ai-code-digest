@@ -1,5 +1,6 @@
 using CodeDigest.Models;
 using DotNet.Globbing;
+using System.Text.RegularExpressions;
 using Encoding = Tiktoken.Encoding;
 
 namespace CodeDigest.Services;
@@ -16,52 +17,89 @@ public class AnalyzerService
     public Task<DirectoryNode> AnalyzeAsync(string path, GitIgnoreMatcher ignoreMatcher, AnalyzeSettings settings)
     {
         var rootDirectoryInfo = new DirectoryInfo(path);
-        return AnalyzeDirectoryAsync(rootDirectoryInfo, rootDirectoryInfo.FullName, ignoreMatcher, settings, false);
+        // Start the recursive analysis, passing isParentIgnored = false for the root.
+        return AnalyzeDirectoryAsync(rootDirectoryInfo, ignoreMatcher, settings, false);
     }
 
-    private async Task<DirectoryNode> AnalyzeDirectoryAsync(DirectoryInfo dirInfo, string rootPath, GitIgnoreMatcher ignoreMatcher, AnalyzeSettings settings, bool isIgnored)
+    private async Task<DirectoryNode> AnalyzeDirectoryAsync(DirectoryInfo dirInfo, GitIgnoreMatcher ignoreMatcher, AnalyzeSettings settings, bool isParentIgnored)
     {
+        // BUG FIX: A directory is ignored if its parent is, or if it matches a pattern itself.
+        var isCurrentDirIgnored = isParentIgnored || ignoreMatcher.IsMatch(dirInfo.FullName);
+
         var children = new List<FileSystemNode>();
-        long totalSize = 0;
-        int totalTokens = 0;
-        int fileCount = 0;
-        int dirCount = 0;
+        long includedSize = 0;
+        int includedTokens = 0;
+        int includedFileCount = 0;
+        int includedDirCount = 0;
+        int ignoredFileCount = 0;
+        int ignoredDirCount = 0;
 
         foreach (var fileSystemInfo in dirInfo.EnumerateFileSystemInfos("*", SearchOption.TopDirectoryOnly))
         {
-            var isNodeIgnored = isIgnored || ignoreMatcher.IsMatch(fileSystemInfo.FullName);
+            var isChildNodeIgnored = isCurrentDirIgnored || ignoreMatcher.IsMatch(fileSystemInfo.FullName);
 
             if (fileSystemInfo is FileInfo fileInfo)
             {
                 var isText = IsTextFile(fileInfo.FullName);
                 var content = isText ? await File.ReadAllTextAsync(fileInfo.FullName) : "[Non-text file]";
-
                 if (isText && !settings.NoMinify)
                 {
                     content = Minify(content);
                 }
-
                 var tokens = isText ? _cl100kBase.CountTokens(content) : 0;
 
-                children.Add(new FileNode(fileInfo.Name, fileInfo.FullName, fileInfo.Length, tokens, content, isText, isNodeIgnored));
-                if (isNodeIgnored) continue;
-                totalSize += fileInfo.Length;
-                totalTokens += tokens;
-                fileCount++;
+                children.Add(new FileNode(fileInfo.Name, fileInfo.FullName, fileInfo.Length, tokens, content, isText, isChildNodeIgnored));
+
+                if (isChildNodeIgnored)
+                {
+                    ignoredFileCount++;
+                }
+                else
+                {
+                    includedSize += fileInfo.Length;
+                    includedTokens += tokens;
+                    includedFileCount++;
+                }
             }
             else if (fileSystemInfo is DirectoryInfo subDirInfo)
             {
-                var subDirNode = await AnalyzeDirectoryAsync(subDirInfo, rootPath, ignoreMatcher, settings, isNodeIgnored);
+                // Recurse into the subdirectory
+                var subDirNode = await AnalyzeDirectoryAsync(subDirInfo, ignoreMatcher, settings, isCurrentDirIgnored);
                 children.Add(subDirNode);
-                if (isNodeIgnored) continue;
-                totalSize += subDirNode.Size;
-                totalTokens += subDirNode.TotalTokenCount;
-                fileCount += subDirNode.FileCount;
-                dirCount += 1 + subDirNode.DirCount;
+
+                if (isChildNodeIgnored)
+                {
+                    ignoredDirCount++;
+                    // If a directory is ignored, all its contents count as ignored.
+                    ignoredFileCount += subDirNode.IncludedFileCount + subDirNode.IgnoredFileCount;
+                    ignoredDirCount += subDirNode.IncludedDirCount + subDirNode.IgnoredDirCount;
+                }
+                else
+                {
+                    // If a directory is included, its metrics contribute to the parent's metrics.
+                    includedSize += subDirNode.Size;
+                    includedTokens += subDirNode.TotalTokenCount;
+                    includedFileCount += subDirNode.IncludedFileCount;
+                    includedDirCount += 1 + subDirNode.IncludedDirCount; // +1 for the subdirectory itself
+                    ignoredFileCount += subDirNode.IgnoredFileCount;
+                    ignoredDirCount += subDirNode.IgnoredDirCount;
+                }
             }
         }
 
-        return new DirectoryNode(dirInfo.Name, dirInfo.FullName, totalSize, totalTokens, fileCount, dirCount, children, isIgnored);
+        // Create the node for the current directory, now marked with its own correct ignored status.
+        var node = new DirectoryNode(dirInfo.Name, dirInfo.FullName, children, isCurrentDirIgnored)
+        {
+            // Populate the node with the calculated metrics.
+            Size = includedSize,
+            TotalTokenCount = includedTokens,
+            IncludedFileCount = includedFileCount,
+            IncludedDirCount = includedDirCount,
+            IgnoredFileCount = ignoredFileCount,
+            IgnoredDirCount = ignoredDirCount
+        };
+
+        return node;
     }
 
     private bool IsTextFile(string filePath)
@@ -71,7 +109,7 @@ public class AnalyzerService
             using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
             var buffer = new byte[1024];
             var bytesRead = stream.Read(buffer, 0, buffer.Length);
-            for (int i = 0; i < bytesRead; i++)
+            for (var i = 0; i < bytesRead; i++)
             {
                 if (buffer[i] == 0) return false;
             }
@@ -82,9 +120,8 @@ public class AnalyzerService
 
     private string Minify(string content)
     {
-        var lines = content.Split('\n')
-                .Select(line => line.Trim())
-                .Where(line => !string.IsNullOrEmpty(line));
-        return string.Join("\n", lines);
+        // Replace any sequence of one or more whitespace characters (including newlines) with a single space,
+        // then trim any leading/trailing space from the result.
+        return Regex.Replace(content, @"\s+", " ").Trim();
     }
 }

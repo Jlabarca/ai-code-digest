@@ -25,13 +25,13 @@ dotnet tool install --global --add-source ./nupkg codedigest
 To analyze a codebase, use the `analyze` command, providing the path to the directory you want to analyze:
 
 ```bash
-code-digest analyze <PATH_TO_CODEBASE>
+code-digest <PATH_TO_CODEBASE>
 ```
 
 This will generate a digest file in the current directory, named `<CODEBASE_NAME>_digest.txt`. You can specify a different output file using the `-o` or `--output` option:
 
 ```bash
-code-digest analyze <PATH_TO_CODEBASE> -o my_digest.txt
+code-digest <PATH_TO_CODEBASE> -o my_digest.txt
 ```
 
 ### Generating an Ignore File
