@@ -2,14 +2,6 @@
 
 AI Code Digest is a command-line tool that analyzes a codebase, providing a detailed digest of the project's structure, file contents, and token count. This tool is designed to help developers quickly understand a new codebase, identify key areas of interest, and prepare the code for analysis by large language models (LLMs).
 
-## Features
-
-- **Codebase Analysis**: Recursively analyzes a directory to build a tree of files and folders, calculating the size and token count of each file.
-- **Customizable Ignore Patterns**: Uses a `.aidigestignore` file, similar to `.gitignore`, to exclude specific files and directories from the analysis.
-- **AI-Powered Ignore File Generation**: Includes a command to generate a `.aidigestignore` file automatically using the Gemini API, based on the project's structure.
-- **Prompt Library**: Allows you to include a library of prompts in the analysis, which can be used to guide an LLM in performing specific tasks with the codebase digest.
-- **Clipboard Integration**: Easily copy the full analysis report to the clipboard for use in other applications.
-
 ## Installation
 
 To install AI Code Digest, you will need the .NET 9.0 SDK. Once you have the SDK installed, you can install the tool from the root of the project directory:
