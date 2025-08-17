@@ -170,30 +170,33 @@ internal class AnalyzeCommand : AsyncCommand<AnalyzeSettings>
     }
   }
 
-
   private string GenerateProjectStructure(DirectoryNode root)
   {
     var sb = new StringBuilder();
-    sb.AppendLine("# Project Structure (all files)");
+    sb.AppendLine("# Project Structure");
     sb.AppendLine("```");
 
     void AppendNode(FileSystemNode node)
     {
+      // Don't process any part of an ignored directory tree.
+      if (node.IsIgnored) return;
+
       sb.Append(node.Name);
       if (node is DirectoryNode dir)
       {
-        var children = dir.Children
+        var includedChildren = dir.Children
+            .Where(c => !c.IsIgnored)
             .OrderBy(c => c is DirectoryNode ? 0 : 1)
             .ThenBy(c => c.Name)
             .ToList();
 
-        if (children.Count > 0)
+        if (includedChildren.Count > 0)
         {
           sb.Append('(');
-          for(var i = 0; i < children.Count; i++)
+          for (var i = 0; i < includedChildren.Count; i++)
           {
-            AppendNode(children[i]);
-            if (i < children.Count - 1)
+            AppendNode(includedChildren[i]);
+            if (i < includedChildren.Count - 1)
             {
               sb.Append(' ');
             }

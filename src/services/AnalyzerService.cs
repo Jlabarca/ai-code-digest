@@ -15,7 +15,6 @@ public class AnalyzerService
     return AnalyzeDirectoryAsync(rootDirectoryInfo, ignoreMatcher, settings, false);
   }
 
-
   private async Task<DirectoryNode> AnalyzeDirectoryAsync(DirectoryInfo dirInfo, GitIgnoreMatcher ignoreMatcher, AnalyzeSettings settings, bool isParentIgnored)
   {
     var isCurrentDirIgnored = isParentIgnored || ignoreMatcher.IsMatch(dirInfo.FullName, true);
@@ -32,15 +31,40 @@ public class AnalyzerService
     {
       if (fileSystemInfo is FileInfo fileInfo)
       {
-        // FIX: Check if the file is ignored, passing 'false' for isDirectory.
         var isFileIgnored = isCurrentDirIgnored || ignoreMatcher.IsMatch(fileInfo.FullName, false);
         var isText = IsTextFile(fileInfo.FullName);
-        var content = isText ? await File.ReadAllTextAsync(fileInfo.FullName) : "[Non-text file]";
-        if (isText && !settings.NoMinify)
+        string content;
+        int tokens = 0;
+
+        if (isText)
         {
-          content = Minify(content);
+          try
+          {
+            content = await File.ReadAllTextAsync(fileInfo.FullName);
+            if (content.Contains('\0'))
+            {
+              isText = false; // Correct our initial assumption.
+              content = "[Binary file]";
+            } else
+            {
+              // Only minify and count tokens if it's confirmed to be text.
+              if (!settings.NoMinify)
+              {
+                content = Minify(content);
+              }
+              tokens = _cl100kBase.CountTokens(content);
+            }
+          }
+          catch (Exception)
+          {
+            // If reading as text fails for any reason, treat it as binary.
+            isText = false;
+            content = "[Unreadable file]";
+          }
+        } else
+        {
+          content = "[Binary file]";
         }
-        var tokens = isText ? _cl100kBase.CountTokens(content) : 0;
 
         children.Add(new FileNode(fileInfo.Name, fileInfo.FullName, fileInfo.Length, tokens, content, isText, isFileIgnored));
 
@@ -98,12 +122,25 @@ public class AnalyzerService
       using var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read);
       var buffer = new byte[1024];
       var bytesRead = stream.Read(buffer, 0, buffer.Length);
+
+      // Check for a UTF-8 BOM (Byte Order Mark)
+      if (bytesRead >= 3 && buffer[0] == 0xEF && buffer[1] == 0xBB && buffer[2] == 0xBF)
+      {
+        return true;
+      }
+
       for(var i = 0; i < bytesRead; i++)
       {
-        if (buffer[i] == 0) return false;
+        if (buffer[i] == 0) // Null characters are a strong indicator of a binary file
+        {
+          return false;
+        }
       }
     }
-    catch (IOException) { return false; }
+    catch (IOException)
+    {
+      return false;
+    }
     return true;
   }
 
